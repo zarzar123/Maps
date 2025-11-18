@@ -1,0 +1,153 @@
+# ============================================
+# Blue–Green Escape Map for U.S. Cities
+# ============================================
+
+# If you don't have these:
+# !pip install pandas numpy folium geopandas branca
+
+import os
+import pandas as pd
+import numpy as np
+import folium
+from folium.plugins import MarkerCluster
+from branca.colormap import LinearColormap
+
+# --------------------------------------------
+# 1. Load or create data
+# --------------------------------------------
+
+csv_path = "us_cities_escape_inputs.csv"
+
+if not os.path.exists(csv_path):
+    # Create a small sample dataset you can later replace with real data
+    data = {
+        "city": [
+            "Seattle", "Portland", "San Francisco", "Los Angeles",
+            "Denver", "Chicago", "New York", "Miami", "Minneapolis", "Phoenix"
+        ],
+        "state": [
+            "WA", "OR", "CA", "CA",
+            "CO", "IL", "NY", "FL", "MN", "AZ"
+        ],
+        "lat": [
+            47.6062, 45.5152, 37.7749, 34.0522,
+            39.7392, 41.8781, 40.7128, 25.7617, 44.9778, 33.4484
+        ],
+        "lon": [
+            -122.3321, -122.6784, -122.4194, -118.2437,
+            -104.9903, -87.6298, -74.0060, -80.1918, -93.2650, -112.0740
+        ],
+        # Fake but plausible scores (0–100) for demo:
+        # Higher green_score = more green / trees / parks
+        "green_score": [80, 75, 60, 40, 55, 45, 50, 30, 70, 20],
+        # Higher blue_score = closer / more access to water
+        "blue_score":  [85, 70, 80, 65, 40, 55, 75, 90, 50, 30],
+        # Higher heat_score = hotter (we will invert this in EscapeScore)
+        "heat_score":  [40, 45, 55, 75, 60, 65, 70, 85, 50, 90],
+        # Just some approximate population figures (not precise, for demo)
+        "population":  [750000, 650000, 880000, 4000000, 715000,
+                        2700000, 8400000, 470000, 430000, 1700000]
+    }
+
+    df = pd.DataFrame(data)
+    df.to_csv(csv_path, index=False)
+    print(f"Sample dataset created: {csv_path}")
+else:
+    print(f"Loading existing dataset: {csv_path}")
+    df = pd.read_csv(csv_path)
+
+# Quick peek
+display(df.head())
+
+# --------------------------------------------
+# 2. Normalize indicators and compute EscapeScore
+# --------------------------------------------
+
+def minmax_norm(series: pd.Series) -> pd.Series:
+    if series.max() == series.min():
+        # Avoid divide-by-zero: return zeros if constant
+        return pd.Series(0.0, index=series.index)
+    return (series - series.min()) / (series.max() - series.min())
+
+for col in ["green_score", "blue_score", "heat_score"]:
+    df[col + "_norm"] = minmax_norm(df[col])
+
+# Weights for the composite index
+w_g, w_b, w_h = 0.4, 0.3, 0.3  # green, blue, heat (inverted)
+
+df["escape_score"] = (
+    w_g * df["green_score_norm"] +
+    w_b * df["blue_score_norm"] +
+    w_h * (1 - df["heat_score_norm"])   # cooler = better
+)
+
+# Optional: sanity check
+display(df[[
+    "city", "state",
+    "green_score_norm", "blue_score_norm", "heat_score_norm",
+    "escape_score"
+]].round(2))
+
+# --------------------------------------------
+# 3. Create Folium map
+# --------------------------------------------
+
+# Map center: mean of lat/lon
+center_lat = df["lat"].mean()
+center_lon = df["lon"].mean()
+
+m = folium.Map(location=[center_lat, center_lon], zoom_start=4, tiles="CartoDB positron")
+
+# Color scale: red (low) -> yellow -> green (high)
+min_score = df["escape_score"].min()
+max_score = df["escape_score"].max()
+
+colormap = LinearColormap(
+    colors=["red", "yellow", "green"],
+    vmin=min_score,
+    vmax=max_score,
+).to_step(n=10)
+
+colormap.caption = "Escape Score (higher = greener, bluer, cooler)"
+
+marker_cluster = MarkerCluster().add_to(m)
+
+# Helper to scale marker radius
+def scale_radius(pop, min_pop, max_pop, min_r=4, max_r=12):
+    if max_pop == min_pop:
+        return (min_r + max_r) / 2
+    return min_r + (pop - min_pop) * (max_r - min_r) / (max_pop - min_pop)
+
+min_pop = df["population"].min()
+max_pop = df["population"].max()
+
+for _, row in df.iterrows():
+    score = row["escape_score"]
+    color = colormap(score)
+    radius = scale_radius(row["population"], min_pop, max_pop)
+
+    popup_html = f"""
+    <b>{row['city']}, {row['state']}</b><br>
+    Escape score: {score:.2f}<br>
+    Green (norm): {row['green_score_norm']:.2f}<br>
+    Blue (norm): {row['blue_score_norm']:.2f}<br>
+    Heat (norm): {row['heat_score_norm']:.2f} (higher = hotter)<br>
+    Population: {int(row['population']):,}
+    """
+
+    popup = folium.Popup(popup_html, max_width=250)
+
+    folium.CircleMarker(
+        location=[row["lat"], row["lon"]],
+        radius=radius,
+        color=color,
+        fill=True,
+        fill_color=color,
+        fill_opacity=0.8,
+        popup=popup,
+    ).add_to(marker_cluster)
+
+# Add color legend
+colormap.add_to(m)
+
+m
